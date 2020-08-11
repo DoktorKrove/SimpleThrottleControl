@@ -1,18 +1,6 @@
-﻿using Sandbox.Game.EntityComponents;
-using Sandbox.ModAPI.Ingame;
-using Sandbox.ModAPI.Interfaces;
-using SpaceEngineers.Game.ModAPI.Ingame;
-using System.Collections.Generic;
-using System.Collections;
-using System.Linq;
-using System.Text;
+﻿using Sandbox.ModAPI.Ingame;
 using System;
-using VRage.Collections;
-using VRage.Game.Components;
-using VRage.Game.ModAPI.Ingame;
-using VRage.Game.ModAPI.Ingame.Utilities;
-using VRage.Game.ObjectBuilders.Definitions;
-using VRage.Game;
+using System.Collections.Generic;
 using VRageMath;
 
 namespace IngameScript
@@ -24,19 +12,31 @@ namespace IngameScript
         // Modify these settings to adjust how everything works
         // =====================================================
 
-        //these values effect how quickly the ship will correct its speed over time
+        //These values effect how quickly the ship will correct its speed over time
+
+        //Small screen mode is good for small LCD's that are hard to read
+        //Recommended to be set to true for the fighter cockpit
+        bool SMALL_LCD_MODE = false;
+
 
         //This setting effects the slope of the thrusters
         //larger values mean quicker changes in thrust
-        const float multiplier = 1.5f;
+        const float MULTIPLIER = 1.5f;
 
 
         //This is the Dead Zone for speed, if speed is within this range +/-
         //the ship won’t keep trying to adjust the speed
         const float deadZone = 0.0f;
 
+        //enable text screens
+        bool ENABLE_LCD = true;
+        //enable cockpit built in LCD
+        bool ENABLE_COCKPIT_LCD = true;
         //This is the tag for LCD's that you want to display some stats on
         const string LCD_TAG = "!Throttle";
+
+        //This is the index for the LCD panels in the cockpit
+        const int LCD_INDEX = 1;
 
         //Frequency LCD's are updated
         //Smaller numbers will decrees performance
@@ -51,12 +51,18 @@ namespace IngameScript
         // DO NOT EDIT BELOW THIS LINE!!!
         // ========================================
 
+        const string RUNNING_ECHO = "Throttle Control Running...\nType a mode into the argument to change modes\nAvailable Modes (not case sensative)\nNormal\nCruise\nCruise+\nDecoupled\nStop\nAny number from 0 to max speed";
+
         //Lists of blocks for use by the script
         List<IMyCockpit> cockpits = new List<IMyCockpit>();
         List<IMyThrust> thrusters = new List<IMyThrust>();
         List<IMyTextPanel> textPanels = new List<IMyTextPanel>();
         List<IMyThrust> forwardThrusters;
         List<IMyThrust> backwardThrusters;
+        List<IMyThrust> upThrusters;
+        List<IMyThrust> downThrusters;
+        List<IMyThrust> leftThrusters;
+        List<IMyThrust> rightThrusters;
 
         //basic variables
         bool setup = true;
@@ -71,9 +77,16 @@ namespace IngameScript
         double targetSpeed;
         double currentSpeed;
         float throttle;
+        float throttleFB;
+        float throttleUD;
+        float throttleLR;
+        Vector3D targetVectorSpeed = Vector3D.Zero;
+        Vector3D currentVectorSpeed = Vector3D.Zero;
 
         //Get the blocks required to run the script
         IMyCockpit controlSeat;
+        IMyTextSurfaceProvider cockpitLCDSurface;
+        IMyTextSurface cockpitLCD;
 
 
         public Program()
@@ -81,28 +94,29 @@ namespace IngameScript
             Runtime.UpdateFrequency = UpdateFrequency.Update1;
 
             //disable any thrust overrides when a saved game was started
-            DisableThusterOveride(forwardThrusters);
-            DisableThusterOveride(backwardThrusters);
+            DisableThrusterOverideAll();
         }
 
         public void Main(string argument, UpdateType updateSource)
-        {
+        {   //update tick for the script to keep track of time
+            //make sure ticks does not go above its maximum
+            if (tick > 2000000000)
+                tick = 0;
+
+            tick++;
+
             //These are values that require to be run first
             if (setup)
             {
-                //Get the blocks on the grid
                 GridTerminalSystem.GetBlocksOfType(cockpits, cockPit => cockPit.IsMainCockpit);
                 GridTerminalSystem.GetBlocksOfType(thrusters);
                 GridTerminalSystem.GetBlocksOfType(textPanels, blockName => blockName.DisplayNameText.Contains(LCD_TAG));
 
-                //enable all the LCD's to show text
-                foreach (IMyTextPanel lcd in textPanels)
-                    lcd.ShowPublicTextOnScreen();
                 //Make sure there is a Main Cockpit
-                if (!cockpits.Any<IMyCockpit>())
+                if (cockpits.Count == 0)
                 {
-                    Echo("No Main cockpit!");
                     flightMode = 0;
+                    Echo("There are no main cockpits on your ship");
                 }
                 else if (cockpits.Count > 1)
                 {
@@ -121,164 +135,406 @@ namespace IngameScript
                         {
                             GetForwardThrusters(thrusters, ref forwardThrusters);
                             GetBackwardThrusters(thrusters, ref backwardThrusters);
+                            GetUpThrusters(thrusters, ref upThrusters);
+                            GetDownThrusters(thrusters, ref downThrusters);
+                            GetLeftThrusters(thrusters, ref leftThrusters);
+                            GetRightThrusters(thrusters, ref rightThrusters);
                             setup = false;
                             flightMode = 1;
+                            Echo(RUNNING_ECHO);
+                        }
+                    }
+                    try
+                    {
+                        cockpitLCDSurface = controlSeat;
+                        cockpitLCD = cockpitLCDSurface.GetSurface(LCD_INDEX);
+
+                        //initialize LCD's
+                        foreach (IMyTextPanel lcd in textPanels)
+                        {
+                            lcd.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
                         }
 
+                        cockpitLCD.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE;
+                    }
+                    catch (Exception e)
+                    {
+                        Echo("There is no LCD with the index '" + LCD_INDEX + "' In the main cockpit, please change LCD_INDEX!");
+                        ENABLE_COCKPIT_LCD = false;
                     }
                 }
             }
 
 
-            //update tick for LCD's and time for throttle
-            //make sure ticks does not go above its maximum
-            if (tick > 2000000000)
-                tick = 0;
-
-            tick++;
-
-            //handle arguments
-			string arg = argument.ToLower();
-            if (arg == "stop")
+            //This is the large block of code that runs when everything worked in the setup
+            else
             {
-                flightMode = 0;
-                DisableThusterOveride(forwardThrusters);
-                DisableThusterOveride(backwardThrusters);
-            }
-            else if (arg == "cruise")
-                flightMode = 1;
-            else if (arg == "decoupled")
-                flightMode = 2;
-
-            else if (arg != "")
-                try //Make sure the program dosent crash if the user enters something that is not a double
+                //handle arguments
+                string arg = argument.ToLower();
+                if (arg == "stop" || arg == "normal")
                 {
-                    targetSpeed = double.Parse(argument);
-                    if (targetSpeed > 0)
-                        enableCruisControl = true;
+                    flightMode = 0;
+                    DisableThrusterOverideAll();
                 }
-                catch { }; //we don’t care about any problems as they wont effect anything
+                else if (arg == "cruise")
+                    flightMode = 1;
+                else if (arg == "cruise+")
+                    flightMode = 2;
+                else if (arg == "decoupled")
+                    flightMode = 3;
+                else if (arg != "")
+                    try //Make sure the program dosent crash if the user enters something that is not a double
+                    {
+                        targetSpeed = double.Parse(argument);
+                        if (targetSpeed > 0)
+                            enableCruisControl = true;
+                    }
+                    catch
+                    {
+                        Echo("\"" + arg + "\" is not a valid number!\n" + RUNNING_ECHO);
+                    }
 
 
-            //update displays
-            if (forwardThrusters != null)
-            {
+                //update displays
                 double timeToDistance = Math.Round(GetTimeToSpeed(targetSpeed, currentSpeed, forwardThrusters, controlSeat));
                 WriteStatsToLCD(currentSpeed, targetSpeed, throttle, timeToDistance, flightMode);
-            }
 
-            //if flightMode not 0 run the script
-            if (flightMode > 0)
-            {
-                //get the ships speed
-                currentSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
-
-                //determines if the ship is trying to move forwards, backwards or nither
-                switch (GetShipsDesiredDirection(controlSeat).Z)
+                //if flightMode not 0 run the script
+                switch (flightMode)
                 {
+                    //Flight Mode 0: Normal flight, all that happens is the script checks for double taps to allow mode change
+                    case 0:
+                        switch (GetShipsDesiredDirection(controlSeat).Z)
+                        {
 
-                    case -1:    //forward (yes, a negative value means forward)
-                        enableCruisControl = true;
-                        DisableThusterOveride(forwardThrusters);
-                        DisableThusterOveride(backwardThrusters);
-                        targetSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
-                        lastKeyForward = true;
-                        break;
-                    case 1:     //backwards (because vectors are weird)
-                        if (flightMode < 2)
-                        {
-                            enableCruisControl = false;
-                            targetSpeed = 0;
-                        }
-                        else
-                            targetSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
-                        DisableThusterOveride(forwardThrusters);
-                        DisableThusterOveride(backwardThrusters);
-                        lastKeyBackward = true;
-                        break;
-                    case 0:     //Nothing (finally something that makes sense)
-                        if (enableCruisControl)
-                        {
-                            //get the speed wanted
-                            float speedDifferance = (float)(targetSpeed - currentSpeed);
-                            throttle = GetShipThrottle(multiplier, speedDifferance, 1.0f, 0.0001f);
-                            //If vessel is going faster then the wanted speed
-                            if (speedDifferance > deadZone)
-                            {
-                                SetThrusterPercent(throttle, ref forwardThrusters);
-                            }
-                            else if (speedDifferance < -deadZone)
-                            {
-                                SetThrusterPercent(throttle, ref backwardThrusters);
-                            }
-                            else
-                            {
-                                SetThrusterByVal(0.0001f, ref forwardThrusters);
-                                SetThrusterByVal(0.0001f, ref backwardThrusters);
-                            }
-                        }
+                            case -1:    //forward (yes, a negative value means forward)
+                                lastKeyForward = true;
+                                break;
+                            case 1:     //backwards (because vectors are weird)
+                                lastKeyBackward = true;
+                                break;
+                            case 0:     //Nothing (finally something that makes sense)
 
-                        //Double tap check on key releas
-                        if (lastKeyForward)
-                        {
-                            bool check = CheckTapForward();
-                            if (check)
-                                flightMode = getFlightMode(flightMode, true);
-                            lastKeyForward = false;
-                        }
+                                //Double tap check on key releas
+                                if (lastKeyForward)
+                                {
+                                    bool check = CheckTapForward();
+                                    if (check)
+                                        flightMode = getFlightMode(flightMode, true);
+                                    lastKeyForward = false;
+                                }
 
-                        if (lastKeyBackward)
-                        {
-                            bool check = CheckTapBackward();
-                            if (check)
-                            {
-                                flightMode = getFlightMode(flightMode, false);
-                            }
-                            lastKeyBackward = false;
+                                if (lastKeyBackward)
+                                {
+                                    bool check = CheckTapBackward();
+                                    if (check)
+                                    {
+                                        flightMode = getFlightMode(flightMode, false);
+                                    }
+                                    lastKeyBackward = false;
+                                }
+                                break;
                         }
                         break;
 
+                    //Flight Mode 1: Cruise, The script will attempt to keep the ship moving forward at a set speed, stops if revers is pressed 
+                    case 1:
+                        //get the ships speed
+                        currentSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
 
+                        //determines if the ship is trying to move forwards, backwards or nither
+                        switch (GetShipsDesiredDirection(controlSeat).Z)
+                        {
+
+                            case -1:    //forward (yes, a negative value means forward)
+                                enableCruisControl = true;
+                                DisableThrusterOverideAll();
+                                targetSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
+                                lastKeyForward = true;
+                                break;
+                            case 1:     //backwards (because vectors are weird)
+                                enableCruisControl = false;
+                                targetSpeed = 0;
+                                DisableThrusterOverideAll();
+                                lastKeyBackward = true;
+                                break;
+                            case 0:     //Nothing (finally something that makes sense)
+                                if (enableCruisControl)
+                                {
+                                    //get the speed wanted
+                                    float speedDifferance = (float)(targetSpeed - currentSpeed);
+                                    throttle = GetShipThrottle(MULTIPLIER, speedDifferance, 1.0f, 0.0001f);
+                                    //If vessel is going faster then the wanted speed
+                                    if (speedDifferance > deadZone)
+                                    {
+                                        SetThrusterPercent(throttle, ref forwardThrusters);
+                                    }
+                                    else if (speedDifferance < -deadZone)
+                                    {
+                                        SetThrusterPercent(throttle, ref backwardThrusters);
+                                    }
+                                    else
+                                    {
+                                        SetThrusterByVal(0.0001f, ref forwardThrusters);
+                                        SetThrusterByVal(0.0001f, ref backwardThrusters);
+                                    }
+                                }
+
+                                //Double tap check on key releas
+                                if (lastKeyForward)
+                                {
+                                    bool check = CheckTapForward();
+                                    if (check)
+                                        flightMode = getFlightMode(flightMode, true);
+                                    lastKeyForward = false;
+                                }
+
+                                if (lastKeyBackward)
+                                {
+                                    bool check = CheckTapBackward();
+                                    if (check)
+                                    {
+                                        flightMode = getFlightMode(flightMode, false);
+                                    }
+                                    lastKeyBackward = false;
+                                }
+                                break;
+
+
+                        }
+                        break;
+                    //Flight mode 2: Decoupled mode, the script will maintain a set speed both forward and backwards, pressing backwards only slows down but dosent stop
+                    case 2:
+                        //get the ships speed
+                        currentSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
+
+                        //determines if the ship is trying to move forwards, backwards or nither
+                        switch (GetShipsDesiredDirection(controlSeat).Z)
+                        {
+
+                            case -1:    //forward (yes, a negative value means forward)
+                                enableCruisControl = true;
+                                DisableThrusterOverideAll();
+                                targetSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
+                                lastKeyForward = true;
+                                break;
+                            case 1:     //backwards (because vectors are weird)
+                                targetSpeed = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
+                                DisableThrusterOverideAll();
+                                lastKeyBackward = true;
+                                break;
+                            case 0:     //Nothing (finally something that makes sense)
+                                if (enableCruisControl)
+                                {
+                                    //get the speed wanted
+                                    float speedDifferance = (float)(targetSpeed - currentSpeed);
+                                    throttle = GetShipThrottle(MULTIPLIER, speedDifferance, 1.0f, 0.0001f);
+                                    //If vessel is going faster then the wanted speed
+                                    if (speedDifferance > deadZone)
+                                    {
+                                        SetThrusterPercent(throttle, ref forwardThrusters);
+                                    }
+                                    else if (speedDifferance < -deadZone)
+                                    {
+                                        SetThrusterPercent(throttle, ref backwardThrusters);
+                                    }
+                                    else
+                                    {
+                                        SetThrusterByVal(0.0001f, ref forwardThrusters);
+                                        SetThrusterByVal(0.0001f, ref backwardThrusters);
+                                    }
+                                }
+
+                                //Double tap check on key releas
+                                if (lastKeyForward)
+                                {
+                                    bool check = CheckTapForward();
+                                    if (check)
+                                        flightMode = getFlightMode(flightMode, true);
+                                    lastKeyForward = false;
+                                }
+
+                                if (lastKeyBackward)
+                                {
+                                    bool check = CheckTapBackward();
+                                    if (check)
+                                    {
+                                        flightMode = getFlightMode(flightMode, false);
+                                    }
+                                    lastKeyBackward = false;
+                                }
+                                break;
+
+
+                        }
+                        break;
+                    //Flight mode 3: Decoupled+ mode Script keeps the ship flying in any direction.
+                    case 3:
+
+                        //Get current speed
+                        currentSpeed = controlSeat.GetShipSpeed();
+                        //current speed X
+                        currentVectorSpeed.X = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Up);
+                        //current Speed Y
+                        currentVectorSpeed.Y = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Right);
+                        //Current speed Z
+                        currentVectorSpeed.Z = GetShipDirectionalSpeed(controlSeat, Base6Directions.Direction.Forward);
+
+
+                        if (GetShipsDesiredDirection(controlSeat).Z == -1)      //forward (yes, a negative value means forward)
+                        {
+                            enableCruisControl = true;
+                            targetVectorSpeed.Z = currentVectorSpeed.Z;
+                            DisableThrusterOveride(forwardThrusters);
+                            DisableThrusterOveride(backwardThrusters);
+                            lastKeyBackward = true;
+                        }
+                        else if (GetShipsDesiredDirection(controlSeat).Z == 1)  //backwards (because vectors are weird)
+                        {
+                            enableCruisControl = true;
+                            targetVectorSpeed.Z = currentVectorSpeed.Z;
+                            DisableThrusterOveride(forwardThrusters);
+                            DisableThrusterOveride(backwardThrusters);
+                            lastKeyBackward = true;
+                        }
+
+                        if (GetShipsDesiredDirection(controlSeat).X == -1)      //right
+                        {
+                            enableCruisControl = true;
+                            DisableThrusterOveride(leftThrusters);
+                            DisableThrusterOveride(rightThrusters);
+                            targetVectorSpeed.Y = currentVectorSpeed.Y;
+                        }
+                        else if (GetShipsDesiredDirection(controlSeat).X == 1)  //left
+                        {
+                            enableCruisControl = true;
+                            DisableThrusterOveride(leftThrusters);
+                            DisableThrusterOveride(rightThrusters);
+                            targetVectorSpeed.Y = currentVectorSpeed.Y;
+                        }
+
+                        if (GetShipsDesiredDirection(controlSeat).Y == -1)      //down
+                        {
+                            enableCruisControl = true;
+                            DisableThrusterOveride(upThrusters);
+                            DisableThrusterOveride(downThrusters);
+                            targetVectorSpeed.X = currentVectorSpeed.X;
+                        }
+                        else if (GetShipsDesiredDirection(controlSeat).Y == 1)  //Up
+                        {
+                            enableCruisControl = true;
+                            DisableThrusterOveride(upThrusters);
+                            DisableThrusterOveride(downThrusters);
+                            targetVectorSpeed.X = currentVectorSpeed.X;
+                        }
+
+
+
+                        if (GetShipsDesiredDirection(controlSeat).Z == 0 && GetShipsDesiredDirection(controlSeat).Y == 0 && GetShipsDesiredDirection(controlSeat).X == 0)     //No buttons held
+                        {
+                            if (enableCruisControl)
+                            {
+                                //get current speed
+                                float speedDifferanceFB = (float)(targetVectorSpeed.Z - currentVectorSpeed.Z);
+                                float speedDifferanceUD = (float)(targetVectorSpeed.X - currentVectorSpeed.X);
+                                float speedDifferanceLR = (float)(targetVectorSpeed.Y - currentVectorSpeed.Y);
+                                throttle = 0;
+
+                                //Forward/back
+                                if (speedDifferanceFB > deadZone)
+                                {
+                                    throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceFB, 1.0f, 0.0001f);
+                                    throttle += throttleFB;
+                                    SetThrusterPercent(throttleFB, ref forwardThrusters);
+                                }
+                                else if (speedDifferanceFB < -deadZone)
+                                {
+                                    throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceFB, 1.0f, 0.0001f);
+                                    throttle += throttleFB;
+                                    SetThrusterPercent(throttleFB, ref backwardThrusters);
+                                }
+                                else
+                                {
+                                    SetThrusterByVal(0.0001f, ref forwardThrusters);
+                                    SetThrusterByVal(0.0001f, ref backwardThrusters);
+                                }
+                                //Left/right
+                                if (speedDifferanceLR > deadZone)
+                                {
+                                    throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceLR, 1.0f, 0.0001f);
+                                    throttle += throttleLR;
+                                    SetThrusterPercent(throttleLR, ref leftThrusters);
+                                }
+                                else if (speedDifferanceLR < -deadZone)
+                                {
+                                    throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceLR, 1.0f, 0.0001f);
+                                    throttle += throttleLR;
+                                    SetThrusterPercent(throttleLR, ref rightThrusters);
+                                }
+                                else
+                                {
+                                    SetThrusterByVal(0.0001f, ref leftThrusters);
+                                    SetThrusterByVal(0.0001f, ref rightThrusters);
+                                }
+                                //Up/Down
+                                if (speedDifferanceUD > deadZone)
+                                {
+                                    throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceUD, 1.0f, 0.0001f);
+                                    throttle += throttleUD;
+                                    SetThrusterPercent(throttleUD, ref upThrusters);
+                                }
+                                else if (speedDifferanceUD < -deadZone)
+                                {
+                                    throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceUD, 1.0f, 0.0001f);
+                                    throttle += throttleUD;
+                                    SetThrusterPercent(throttleUD, ref downThrusters);
+                                }
+                                else
+                                {
+                                    SetThrusterByVal(0.0001f, ref upThrusters);
+                                    SetThrusterByVal(0.0001f, ref downThrusters);
+                                }
+
+                                /*WriteStatsToLCD( 
+                                    "Forward: " + currentVectorSpeed.Z + 
+                                    "\nForward: " + targetVectorSpeed.Z +
+                                    "\nDif: " + speedDifferanceFB +
+                                    "\nRight: " + currentVectorSpeed.Y + 
+                                    "\nRight: " + targetVectorSpeed.Y +
+                                    "\nDif: " + speedDifferanceLR +
+                                    "\nUp: " + currentVectorSpeed.X + 
+                                    "\nUp: " + targetVectorSpeed.X +
+                                    "\nDif: " + speedDifferanceUD);*/
+                            }
+
+
+
+                            //Double tap check on key releas
+                            if (lastKeyForward)
+                            {
+                                bool check = CheckTapForward();
+                                if (check)
+                                    flightMode = getFlightMode(flightMode, true);
+                                lastKeyForward = false;
+                            }
+
+                            if (lastKeyBackward)
+                            {
+                                bool check = CheckTapBackward();
+                                if (check)
+                                {
+                                    flightMode = getFlightMode(flightMode, false);
+                                }
+                                lastKeyBackward = false;
+                            }
+                            break;
+
+
+                        }
+                        break;
                 }
             }
-			else if (flightMode == 0)
-			{
-				switch (GetShipsDesiredDirection(controlSeat).Z)
-                {
-
-                    case -1:    //forward (yes, a negative value means forward)
-                        lastKeyForward = true;
-                        break;
-                    case 1:     //backwards (because vectors are weird)
-                        lastKeyBackward = true;
-                        break;
-                    case 0:     //Nothing (finally something that makes sense)
-
-                        //Double tap check on key releas
-                        if (lastKeyForward)
-                        {
-                            bool check = CheckTapForward();
-                            if (check)
-                                flightMode = getFlightMode(flightMode, true);
-                            lastKeyForward = false;
-                        }
-
-                        if (lastKeyBackward)
-                        {
-                            bool check = CheckTapBackward();
-                            if (check)
-                            {
-                                flightMode = getFlightMode(flightMode, false);
-                            }
-                            lastKeyBackward = false;
-                        }
-                        break;
-
-
-                }
-			}
         }
-
         /*
         * Returns the thrusters facing forward for a given list of thrusters
         */
@@ -291,13 +547,57 @@ namespace IngameScript
         }
 
         /*
-        * Returns the thrusters facing forward for a given list of thrusters
+        * Returns the thrusters facing Backward for a given list of thrusters
         */
         public void GetBackwardThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
         {
             foundForwardThrusters = new List<IMyThrust>();
             foreach (IMyThrust currThruster in allThrusters)
                 if (currThruster.GridThrustDirection.Z == -1)
+                    foundForwardThrusters.Add(currThruster);
+        }
+
+        /*
+        * Returns the thrusters facing Up for a given list of thrusters
+        */
+        public void GetUpThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
+        {
+            foundForwardThrusters = new List<IMyThrust>();
+            foreach (IMyThrust currThruster in allThrusters)
+                if (currThruster.GridThrustDirection.Y == -1)
+                    foundForwardThrusters.Add(currThruster);
+        }
+
+        /*
+        * Returns the thrusters facing Down for a given list of thrusters
+        */
+        public void GetDownThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
+        {
+            foundForwardThrusters = new List<IMyThrust>();
+            foreach (IMyThrust currThruster in allThrusters)
+                if (currThruster.GridThrustDirection.Y == 1)
+                    foundForwardThrusters.Add(currThruster);
+        }
+
+        /*
+        * Returns the thrusters facing Left for a given list of thrusters
+        */
+        public void GetLeftThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
+        {
+            foundForwardThrusters = new List<IMyThrust>();
+            foreach (IMyThrust currThruster in allThrusters)
+                if (currThruster.GridThrustDirection.X == -1)
+                    foundForwardThrusters.Add(currThruster);
+        }
+
+        /*
+        * Returns the thrusters facing Right for a given list of thrusters
+        */
+        public void GetRightThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
+        {
+            foundForwardThrusters = new List<IMyThrust>();
+            foreach (IMyThrust currThruster in allThrusters)
+                if (currThruster.GridThrustDirection.X == 1)
                     foundForwardThrusters.Add(currThruster);
         }
 
@@ -343,7 +643,7 @@ namespace IngameScript
             }
         }
 
-        public void DisableThusterOveride(List<IMyThrust> thrusters)
+        public void DisableThrusterOveride(List<IMyThrust> thrusters)
         {
             if (thrusters != null)
                 foreach (IMyThrust thruster in thrusters)
@@ -352,100 +652,177 @@ namespace IngameScript
                 }
         }
 
+        public void DisableThrusterOverideAll()
+        {
+            if (thrusters != null)
+                foreach (IMyThrust thruster in thrusters)
+                {
+                    thruster.ThrustOverride = -1;
+                }
+        }
+
+        public string GetTextForLCD(double speed, double targetSpeed, float throttleOutput, double timeToSpeed, int running)
+        {
+            string state;
+            string output = "Speed: " + Math.Round(speed, 2) + "m / s" + '\n' +
+                        "Target:          " + Math.Round(targetSpeed, 2) + "m/s" + '\n' +
+                        "Delay:           " + timeToSpeed + "s" + '\n' +
+                        "Throttle:        " + Math.Round(throttleOutput * 100, 1) + "%" + '\n';
+            if (SMALL_LCD_MODE)
+            {
+				switch (flightMode)
+
+				{
+                    case 0:
+                        state = "NORMAL";
+                        break;
+                    case 1:
+                        state = "CRUISE";
+                        break;
+                    case 2:
+                        state = "CRUISE+";
+                        break;
+                    case 3:
+                        state = "DECOUPLED";
+                        break;
+                    default:
+                        state = "UNKNOWN: " + flightMode;
+                        break;
+                }
+            }
+            else
+            {
+                output += "\\/  Flight Mode  \\/\n'";
+
+                switch (flightMode)
+                {
+                    case 0:
+                        state = (
+                                    "DECOUPLED" + '\n' +
+                                    "CRUISE" + '\n' +
+                                    "NORMAL           <==" + '\n'
+                                );
+                        break;
+                    case 1:
+                        state = (
+                                    "DECOUPLED" + '\n' +
+                                    "CRUISE             <==" + '\n' +
+                                    "NORMAL" + '\n'
+                                );
+                        break;
+                    case 2:
+                        state = (
+                                    "DECOUPLED" + '\n' +
+                                    "CRUISE+           <==" + '\n' +
+                                    "NORMAL" + '\n'
+                                );
+                        break;
+                    case 3:
+                        state = (
+                                    "DECOUPLED  <==" + '\n' +
+                                    "CRUISE" + '\n' +
+                                    "NORMAL" + '\n'
+                                );
+                        break;
+                    default:
+                        state = "Unknown Mode: " + flightMode;
+                        break;
+                }
+            }
+            output += state;
+            return output;
+        }
+
 
         private void WriteStatsToLCD(double speed, double targetSpeed, float throttleOutput, double timeToSpeed, int running)
         {
             if (tick - lastLCDTick > UPDATE_INTERVAL)
             {
                 lastLCDTick = tick;
-                if (textPanels != null)
+
+                //Text Panels
+                if (ENABLE_LCD)
                 {
-                    string state = "NORMAL";
-                    string normal = "Normal";
-                    string cruise = "Cruise";
-                    string decoupled = "Decoupled";
-                    if (flightMode == 0)
-                    {
-                        state = "NORMAL";
-                        normal = "Normal         <=";
-                    }
-                    else if (flightMode == 1)
-                    {
-                        state = "CRUISE";
-                        cruise = "Cruise          <=";
-                    }
-                    else if (flightMode == 2)
-                    {
-                        state = "DECOUPLED";
-                        decoupled = "Decoupled   <=";
-                    }
                     foreach (IMyTextPanel lcd in textPanels)
-                        lcd.WritePublicText(
-                                                "Speed: 	         " + Math.Round(speed, 2) + "m/s" + '\n' +
-                                                "Target:          " + Math.Round(targetSpeed, 2) + "m/s" + '\n' +
-                                                "Delay:           " + timeToSpeed + "s" + '\n' +
-                                                "Throttle:        " + Math.Round(throttleOutput * 100, 1) + "%" + '\n' +
-                                                "FlightMode:  " + state + '\n' +
-                                                decoupled + '\n' +
-                                                cruise + '\n' +
-                                                normal + '\n'
-                                           );
+                    {
+                        lcd.WriteText(GetTextForLCD(speed, targetSpeed, throttleOutput, timeToSpeed, running));
+                    }
+                }
+
+                //LCD panels (cockpit LCD)
+                if (ENABLE_COCKPIT_LCD)
+                {
+                    cockpitLCD.WriteText(GetTextForLCD(speed, targetSpeed, throttleOutput, timeToSpeed, running));
                 }
             }
         }
 
+        //write simple text to text panels only, not Cockpit LCD
         private void WriteStatsToLCD(string message)
         {
             if (tick - lastLCDTick > UPDATE_INTERVAL)
             {
                 lastLCDTick = tick;
-                if (textPanels != null)
+                if (ENABLE_LCD)
                 {
                     foreach (IMyTextPanel lcd in textPanels)
-                        lcd.WritePublicText(message);
+                        lcd.WriteText(message);
                 }
             }
-
         }
-		
-		/*
-		* Returns a flight mode based on the current flight mode and the direction
+
+        /*
+		* Returns a flight mode based on the current flight mode and the direction, true means move up, false down
 		*/
-		public byte getFlightMode(byte currentMode, bool goUp)
-		{
+        public byte getFlightMode(byte currentMode, bool goUp)
+        {
 
             switch (currentMode)
-			{
-				case 0:
-					if (goUp)
+            {
+                case 0:
+                    if (goUp)
                         currentMode++;
                     break;
-				case 1:
-					if (goUp)
+                case 1:
+                    if (goUp)
                         currentMode++;
-					else
-					{
+                    else
+                    {
                         currentMode--;
-						enableCruisControl = false;
-						DisableThusterOveride(forwardThrusters);
-						DisableThusterOveride(backwardThrusters);
-						targetSpeed = 0;
-					}
+                        enableCruisControl = false;
+                        DisableThrusterOveride(forwardThrusters);
+                        DisableThrusterOveride(backwardThrusters);
+                        targetSpeed = 0;
+                    }
                     break;
-				case 2:
+                case 2:
+                    if (goUp)
+                        currentMode++;
+                    else
+                    {
+                        currentMode--;
+                        enableCruisControl = false;
+                        DisableThrusterOveride(forwardThrusters);
+                        DisableThrusterOveride(backwardThrusters);
+                        targetSpeed = 0;
+                    }
+                    break;
+                case 3:
                     if (!goUp)
                     {
                         currentMode--;
                         enableCruisControl = false;
-                        DisableThusterOveride(forwardThrusters);
-                        DisableThusterOveride(backwardThrusters);
-                        targetSpeed = 0;
+                        DisableThrusterOveride(forwardThrusters);
+                        DisableThrusterOveride(backwardThrusters);
+                        targetVectorSpeed.Z = currentVectorSpeed.Z;
+                        targetVectorSpeed.Y = currentVectorSpeed.Y;
+                        targetVectorSpeed.X = currentVectorSpeed.X;
                     }
                     break;
-			}
-			
-			return currentMode;
-		}
+            }
+
+            return currentMode;
+        }
 
         /*
         * Returns the time it will take for a ship to reach a set speed
