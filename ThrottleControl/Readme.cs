@@ -1,6 +1,6 @@
 ﻿// Doktor's Throttle control
-// Version 3.1
-// Date: 2020-09-14
+// Version 3.6
+// Date: 2020-11-25
 
 /*
 This script provides a form of throttle to any ship making it easy to fly a ship at a fixed speed.
@@ -56,8 +56,12 @@ hierarchy position.
 
 Arguments
 “stop” -- stops the script
-“cruise” – special flight mode where backwards stops the ship and forward sets the speed 
+“cruise” –- special flight mode where backwards stops the ship and forward sets the speed 
 "cruise+" -- Special flight mode where backwards slows down but doesn’t stop
 "decoupled" -- Cruise+ in any direction. Be careful with this mode!
-“number” – set the target speed to whatever number is set to	
+“number” –- set the target speed to whatever number is set to
+“eco” – Toggle Eco mode on/off
+“eco on” – Toggle eco mode on
+“eco off” – Toggle eco mode off
+
 */
