@@ -1,28 +1,44 @@
-﻿using Sandbox.ModAPI.Ingame;
+﻿using Sandbox.Game.EntityComponents;
+using Sandbox.ModAPI.Ingame;
+using Sandbox.ModAPI.Interfaces;
+using SpaceEngineers.Game.ModAPI.Ingame;
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
+using System.Collections.Immutable;
+using System.Linq;
+using System.Text;
+using VRage;
+using VRage.Collections;
+using VRage.Game;
+using VRage.Game.Components;
+using VRage.Game.GUI.TextPanel;
+using VRage.Game.ModAPI.Ingame;
+using VRage.Game.ModAPI.Ingame.Utilities;
+using VRage.Game.ObjectBuilders.Definitions;
 using VRageMath;
 
 namespace IngameScript
 {
-    partial class Program : MyGridProgram
-    {
-        // =====================================================
-        // Settings 
+	partial class Program : MyGridProgram
+	{
+         // =====================================================
+        // Settings
         // Modify these settings to adjust how everything works
         // =====================================================
 
         //These values effect how quickly the ship will correct its speed over time
 
         //This setting effects the slope of the thrusters
-        //larger values mean more accurate speeds but more 
+        //larger values mean more accurate speeds but more
         //jitter (quick change forward/backward) default 1.5f
+        //Make sure there is a lower case f at the end of the number!
         const float MULTIPLIER = 1.5f;
 
-        //This is the addition for using hydrogen thrusters. It can range 
-        //from 0 to MULTIPLIER, where 0 is normal operation (eco_mode off) and 
+        //This is the addition for using hydrogen thrusters. It can range
+        //from 0 to MULTIPLIER, where 0 is normal operation (eco_mode off) and
         //MULTIPLIER is no hydrogen thrusters.
+        //Make sure there is a lower case f at the end of the number!
         float HYDROGEN_MULTIPLIER = 0.1f;
 
         //This determins what happens when you leave the cockpit.
@@ -33,9 +49,15 @@ namespace IngameScript
 
         //This is the Dead Zone for speed, if speed is within this range +/-
         //the ship won’t keep trying to adjust the speed
+        //Make sure there is a lower case f at the end of the number!
         const float deadZone = 0.0f;
 
-        //This will make the script try to use atmospheric and ion thrusters 
+        //This is the maximum speed the ship will fly while in GOVERNOR
+        //mode.
+        //Make sure there is a lower case f at the end of the number!
+        float maxSpeed = 5.0f;
+
+        //This will make the script try to use atmospheric and ion thrusters
         //over hydrogen thrusters when trying to accelerate/decelerate the ship
         bool eco_mode = true;
 
@@ -44,10 +66,21 @@ namespace IngameScript
         //Small screen mode is good for small LCD's that are hard to read
         //Recommended to be set to true for the fighter cockpit
         bool SMALL_LCD_MODE = false;
+        
         //show stats on the main cockpit LCD
         bool ENABLE_COCKPIT_LCD = true;
+        
+        //Set to true to allow thrusters connected through connector/rotor blocks.
+        bool ENABLE_SUB_GRID_THRUSTERS = false;
+        
         //This is the tag for LCD's that you want to display some stats on
         const string LCD_TAG = "!Throttle";
+        
+        //To use a group of thrusters add the thrusters to a group and give
+        //them a special name. Then put that special name below.
+        //The name must be EXACTLY the same!!!
+        //Leave blank to use all thrusters
+        string GROUP_NAME = "";
 
         //This is the index for the LCD panels in the cockpit
         const int LCD_INDEX = 1;
@@ -61,14 +94,26 @@ namespace IngameScript
         //this is in ticks, there are 60 ticks in a second.
         const int DOUBLE_TAP_DELAY = 15;
 
-        //The word that a cockpit or remote control block 
+        //The word that a cockpit or remote control block
         //will need to be considerd the Main control block.
         //This word can be anywhere in the blocks name.
         const string MAIN_CONTROL_BLOCK_WORD = "!main";
 
         //Time offset used to adjust accuracy of the
         //lcd delay number.
+        //Make sure there is a lower case f at the end of the number!
         const float TIME_OFFSET = 0.35f;
+
+        //Change one of these to disable that mode
+        //Allow Cruise mode
+        bool ALLOW_CRUISE_MODE = true;
+        //Allow Cruise Plus mode
+        bool ALLOW_CRUISE_PLUS_MODE = true;
+        //Allow Decoupled mode
+        bool ALLOW_DECOUPLED_MODE = false;
+        //Allow GOVERNOR mode
+        bool ALLOW_GOVERNOR_MODE = true;
+
 
         // ========================================
         // DO NOT EDIT BELOW THIS LINE!!!
@@ -81,6 +126,9 @@ namespace IngameScript
         List<IMyRemoteControl> remotes = new List<IMyRemoteControl>();
         List<IMyThrust> thrusters = new List<IMyThrust>();
         List<IMyTextPanel> textPanels = new List<IMyTextPanel>();
+        IMyBlockGroup thrusterBlockGroups;
+        List<IMyThrust> thrusterGroup = new List<IMyThrust>();
+        List<IMyShipConnector> connectors = new List<IMyShipConnector>();
         List<IMyThrust> forwardThrusters;
         List<IMyThrust> backwardThrusters;
         List<IMyThrust> upThrusters;
@@ -99,7 +147,9 @@ namespace IngameScript
         int lastTickForward = 0;
         int lastTickBackward = 0;
         int lastLCDTick = 0;
-        byte flightMode = 0;
+        int flightMode = 0;
+        int maxFlightMode = 4;
+        int minFlightMode = 0;
         double targetSpeed;
         double currentSpeed;
         float throttle;
@@ -107,8 +157,10 @@ namespace IngameScript
         float throttleFB;
         float throttleUD;
         float throttleLR;
+        string allowedModes = "0";
         Vector3D targetVectorSpeed = Vector3D.Zero;
         Vector3D currentVectorSpeed = Vector3D.Zero;
+        const float MIN_THRUST_VALUE = 0.0001f;
 
         //Get the blocks required to run the script
         IMyCockpit controlSeat = null;
@@ -146,11 +198,42 @@ namespace IngameScript
 
         }
 
-        /* 
-         * Setup Loop code
-         */
+        /*
+                * Setup Loop code
+                */
         public void SetupScript()
         {
+            if (ALLOW_CRUISE_MODE)
+                allowedModes += 1;
+            if (ALLOW_CRUISE_PLUS_MODE)
+                allowedModes += 2;
+            if (ALLOW_DECOUPLED_MODE)
+                allowedModes += 3;
+            if (ALLOW_GOVERNOR_MODE)
+                allowedModes += 4;
+
+            //check the max flight mode
+            if (!ALLOW_GOVERNOR_MODE)
+            {
+                if (!ALLOW_DECOUPLED_MODE)
+                {
+                    if (!ALLOW_CRUISE_PLUS_MODE)
+                    {
+                        if (!ALLOW_CRUISE_MODE)
+                        {
+                            maxFlightMode = 0;
+                        }
+                        else
+                            maxFlightMode = 1;
+                    }
+                    else
+                        maxFlightMode = 2;
+                }
+                else
+                    maxFlightMode = 3;
+
+            }
+
             int remoteControlBlockIndex = -1;
             int cockpitBlockIndex = -1;
             int checkedCockpit = -1;
@@ -158,6 +241,13 @@ namespace IngameScript
             GridTerminalSystem.GetBlocksOfType(remotes, remoteCon => remoteCon.IsWorking);
             GridTerminalSystem.GetBlocksOfType(thrusters);
             GridTerminalSystem.GetBlocksOfType(textPanels, blockName => blockName.DisplayNameText.Contains(LCD_TAG));
+            GridTerminalSystem.GetBlocksOfType(connectors);
+            if (GROUP_NAME != "")
+            {
+                thrusterBlockGroups = GridTerminalSystem.GetBlockGroupWithName(GROUP_NAME);
+                thrusterBlockGroups.GetBlocksOfType(thrusterGroup);
+            }
+
 
             //remove all blocks not connected to the same grid
             cockpits = RemoveSupergridBlocks(cockpits);
@@ -167,6 +257,7 @@ namespace IngameScript
             //Get remote blocks
             int mainRemoteCount = 0;
             int mainCockpitCount = 0;
+            bool allConnectorsUnconnected;
             for (int i = 0; i < remotes.Count; i++)
             {
                 if (remotes[i].DisplayNameText.ToLower().Contains(MAIN_CONTROL_BLOCK_WORD.ToLower()))
@@ -185,6 +276,17 @@ namespace IngameScript
                 if (cockpits[i].IsMainCockpit)
                     checkedCockpit = i;
             }
+            bool connectedConnector = false;
+            foreach (IMyShipConnector cur in connectors)
+            {
+                if (cur.Status == MyShipConnectorStatus.Connected)
+                    connectedConnector = true;
+            }
+            if (connectedConnector)
+                allConnectorsUnconnected = false;
+            else
+                allConnectorsUnconnected = true;
+
 
             //Make sure there is a Main Cockpit
             if (mainCockpitCount > 1 || mainRemoteCount > 1)
@@ -198,6 +300,12 @@ namespace IngameScript
                 Echo("There are no Main Cockpits or Main Remote Control blocks on your ship\n");
                 Echo("Help:");
                 Echo("Please Add the word  \"" + MAIN_CONTROL_BLOCK_WORD + "\" (without quotes) to the name of a cockpit or remote control block. Then click Recompile Script");
+                flightMode = 0;
+            }
+            else if (ENABLE_SUB_GRID_THRUSTERS && !allConnectorsUnconnected)
+            {
+                Echo("Your ship is connected to another grid!");
+                Echo("Disconnect all connectors to continue.");
                 flightMode = 0;
             }
             else
@@ -218,6 +326,12 @@ namespace IngameScript
 
                     if (IsReadyAndControlled(controlSeat))
                     {
+                        List<IMyThrust> thrusters;
+                        if (GROUP_NAME != "")
+                            thrusters = thrusterGroup;
+                        else
+                            thrusters = this.thrusters;
+
                         GetForwardThrusters(thrusters, ref forwardThrusters);
                         GetBackwardThrusters(thrusters, ref backwardThrusters);
                         GetUpThrusters(thrusters, ref upThrusters);
@@ -225,11 +339,16 @@ namespace IngameScript
                         GetLeftThrusters(thrusters, ref leftThrusters);
                         GetRightThrusters(thrusters, ref rightThrusters);
                         setup = false;
-                        flightMode = 1;
+                        flightMode = 0;
                         Echo(RUNNING_ECHO);
                     }
                     else if (IsReadyAndControlled(controlRemote))
                     {
+                        List<IMyThrust> thrusters;
+                        if (GROUP_NAME != "")
+                            thrusters = thrusterGroup;
+                        else
+                            thrusters = this.thrusters;
                         GetForwardThrusters(thrusters, ref forwardThrusters);
                         GetBackwardThrusters(thrusters, ref backwardThrusters);
                         GetUpThrusters(thrusters, ref upThrusters);
@@ -237,7 +356,7 @@ namespace IngameScript
                         GetLeftThrusters(thrusters, ref leftThrusters);
                         GetRightThrusters(thrusters, ref rightThrusters);
                         setup = false;
-                        flightMode = 1;
+                        flightMode = 0;
                         Echo(RUNNING_ECHO);
                     }
 
@@ -265,8 +384,8 @@ namespace IngameScript
         }
 
         /*
-         * Main Loop Code
-         */
+                * Main Loop Code
+                */
         public void MainScript(string argument)
         {
             CheckControlSeat();
@@ -275,7 +394,9 @@ namespace IngameScript
             if (tick % 35 == 0 || is_active == false)
             {
                 if (is_active)
+                {
                     Echo("Script running...");
+                }
                 else
                 {
                     Echo("Script running...");
@@ -322,8 +443,22 @@ namespace IngameScript
                 flightMode = 2;
             else if (arg.Contains("decoupled"))
                 flightMode = 3;
+            else if (arg.Contains("governor"))
+                flightMode = 4;
+            else if (arg.Contains("max "))
+            {
+                try
+                {
+                    string speedString = arg.Substring(arg.IndexOf("max ")).Substring(4);
+                    maxSpeed = float.Parse(speedString);
+                }
+                catch
+                {
+                    Echo("\"" + arg + "\" is not a valid max speed! Example Max 50.\n" + RUNNING_ECHO);
+                }
+            }
             else if (arg != "")
-                try //Make sure the program dosent crash if the user enters something that is not a double
+                try //Make sure the program doesn't crash if the user enters something that is not a double
                 {
                     targetSpeed = double.Parse(argument);
                     if (targetSpeed > 0)
@@ -368,21 +503,24 @@ namespace IngameScript
                 case 1:
                     ModeCruise(shipDirZ);
                     break;
-                //Flight mode 2: Decoupled mode, the script will maintain a set speed both forward and backwards, pressing backwards only slows down but dosent stop
+                //Flight mode 2: Decoupled mode, the script will maintain a set speed both forward and backwards, pressing backwards only slows down but doesn't stop
                 case 2:
                     ModeCruisePlus(shipDirZ);
                     break;
-                //Flight mode 3: Decoupled+ mode Script keeps the ship flying in any direction.
+                //Flight mode 3: Decoupled mode Script keeps the ship flying in any direction at a set speed.
                 case 3:
                     ModeDecoupled(shipDirX, shipDirY, shipDirZ);
+                    break;
+                case 4:
+                    GOVERNORMode(shipDirX, shipDirY, shipDirZ);
                     break;
             }
         }
 
-        /* 
-         * Flight Mode 0: Normal flightA
-         * This mode just checks for mode changes
-         */
+        /*
+                * Flight Mode 0: Normal flightA
+                * This mode just checks for mode changes
+                */
         public void ModeNormal(int shipDirZ)
         {
             switch (shipDirZ)
@@ -401,10 +539,10 @@ namespace IngameScript
             }
         }
 
-        /* 
-         * Flight Mode 1: Cruise, The script will attempt to keep the ship moving 
-         * forward at a set speed, stops if revers is pressed.
-         */
+        /*
+                * Flight Mode 1: Cruise, The script will attempt to keep the ship moving
+                * forward at a set speed, stops if revers is pressed.
+                */
         public void ModeCruise(int shipDirZ)
         {
             //get the ships speed
@@ -431,8 +569,8 @@ namespace IngameScript
                         //get the speed wanted
                         float speedDifferance = (float)(targetSpeed - currentSpeed);
                         if (eco_mode)
-                            throttleHY = GetShipThrottle(HYDROGEN_MULTIPLIER, speedDifferance, 1.0f, 0.0001f);
-                        throttle = GetShipThrottle(MULTIPLIER, speedDifferance, 1.0f, 0.0001f);
+                            throttleHY = GetShipThrottle(HYDROGEN_MULTIPLIER, speedDifferance, 1.0f, MIN_THRUST_VALUE);
+                        throttle = GetShipThrottle(MULTIPLIER, speedDifferance, 1.0f, MIN_THRUST_VALUE);
                         //If vessel is going faster then the wanted speed
                         if (speedDifferance > deadZone)
                         {
@@ -450,8 +588,8 @@ namespace IngameScript
                         }
                         else
                         {
-                            SetThrusterByVal(0.0001f, ref forwardThrusters);
-                            SetThrusterByVal(0.0001f, ref backwardThrusters);
+                            SetThrusterByVal(MIN_THRUST_VALUE, ref forwardThrusters);
+                            SetThrusterByVal(MIN_THRUST_VALUE, ref backwardThrusters);
                         }
                     }
 
@@ -461,8 +599,8 @@ namespace IngameScript
         }
 
         /* Flight mode 2: Cruise+ mode, the script will maintain a set speed both forward and backwards.
-         * pressing backwards only slows down but dosent stop.
-         */
+                * pressing backwards only slows down but dosent stop.
+                */
         public void ModeCruisePlus(int shipDirZ)
         {
             //get the ships speed
@@ -488,8 +626,8 @@ namespace IngameScript
                         //get the speed wanted
                         float speedDifferance = (float)(targetSpeed - currentSpeed);
                         if (eco_mode)
-                            throttleHY = GetShipThrottle(HYDROGEN_MULTIPLIER, speedDifferance, 1.0f, 0.0001f);
-                        throttle = GetShipThrottle(MULTIPLIER, speedDifferance, 1.0f, 0.0001f);
+                            throttleHY = GetShipThrottle(HYDROGEN_MULTIPLIER, speedDifferance, 1.0f, MIN_THRUST_VALUE);
+                        throttle = GetShipThrottle(MULTIPLIER, speedDifferance, 1.0f, MIN_THRUST_VALUE);
                         //If vessel is going faster then the wanted speed
                         if (speedDifferance > deadZone)
                         {
@@ -507,8 +645,8 @@ namespace IngameScript
                         }
                         else
                         {
-                            SetThrusterByVal(0.0001f, ref forwardThrusters);
-                            SetThrusterByVal(0.0001f, ref backwardThrusters);
+                            SetThrusterByVal(MIN_THRUST_VALUE, ref forwardThrusters);
+                            SetThrusterByVal(MIN_THRUST_VALUE, ref backwardThrusters);
                         }
                     }
 
@@ -518,8 +656,8 @@ namespace IngameScript
         }
 
         /*
-         * Flight mode 3: Decoupled mode Script keeps the ship flying in any direction.
-         */
+                * Flight mode 3: Decoupled mode Script keeps the ship flying in any direction.
+                */
         public void ModeDecoupled(int shipDirX, int shipDirY, int shipDirZ)
         {
             //Get current speed
@@ -538,7 +676,7 @@ namespace IngameScript
                 targetVectorSpeed.Z = currentVectorSpeed.Z;
                 DisableThrusterOveride(forwardThrusters);
                 DisableThrusterOveride(backwardThrusters);
-                lastKeyBackward = true;
+                lastKeyForward = true;
             }
             else if (shipDirZ == 1)  //backwards (because vectors are weird)
             {
@@ -588,77 +726,212 @@ namespace IngameScript
                     //get current speed
                     float speedDifferanceFB = (float)(targetVectorSpeed.Z - currentVectorSpeed.Z);
                     float speedDifferanceUD = (float)(targetVectorSpeed.X - currentVectorSpeed.X);
-                    float speedDifferanceLR = (float)(targetVectorSpeed.Y - currentVectorSpeed.Y);
+                    float speedDifferanceRR = (float)(targetVectorSpeed.Y - currentVectorSpeed.Y);
                     throttle = 0;
 
                     //Forward/back
                     if (speedDifferanceFB > deadZone)
                     {
-                        throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceFB, 1.0f, 0.0001f);
+                        throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceFB, 1.0f, MIN_THRUST_VALUE);
                         throttle += throttleFB;
                         SetThrusterPercent(throttleFB, ref forwardThrusters);
                     }
                     else if (speedDifferanceFB < -deadZone)
                     {
-                        throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceFB, 1.0f, 0.0001f);
+                        throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceFB, 1.0f, MIN_THRUST_VALUE);
                         throttle += throttleFB;
                         SetThrusterPercent(throttleFB, ref backwardThrusters);
                     }
                     else
                     {
-                        SetThrusterByVal(0.0001f, ref forwardThrusters);
-                        SetThrusterByVal(0.0001f, ref backwardThrusters);
+                        SetThrusterByVal(MIN_THRUST_VALUE, ref forwardThrusters);
+                        SetThrusterByVal(MIN_THRUST_VALUE, ref backwardThrusters);
                     }
                     //Left/right
-                    if (speedDifferanceLR > deadZone)
+                    if (speedDifferanceRR > deadZone)
                     {
-                        throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceLR, 1.0f, 0.0001f);
+                        throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceRR, 1.0f, MIN_THRUST_VALUE);
                         throttle += throttleLR;
                         SetThrusterPercent(throttleLR, ref leftThrusters);
                     }
-                    else if (speedDifferanceLR < -deadZone)
+                    else if (speedDifferanceRR < -deadZone)
                     {
-                        throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceLR, 1.0f, 0.0001f);
+                        throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceRR, 1.0f, MIN_THRUST_VALUE);
                         throttle += throttleLR;
                         SetThrusterPercent(throttleLR, ref rightThrusters);
                     }
                     else
                     {
-                        SetThrusterByVal(0.0001f, ref leftThrusters);
-                        SetThrusterByVal(0.0001f, ref rightThrusters);
+                        SetThrusterByVal(MIN_THRUST_VALUE, ref leftThrusters);
+                        SetThrusterByVal(MIN_THRUST_VALUE, ref rightThrusters);
                     }
                     //Up/Down
                     if (speedDifferanceUD > deadZone)
                     {
-                        throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceUD, 1.0f, 0.0001f);
+                        throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceUD, 1.0f, MIN_THRUST_VALUE);
                         throttle += throttleUD;
                         SetThrusterPercent(throttleUD, ref upThrusters);
                     }
                     else if (speedDifferanceUD < -deadZone)
                     {
-                        throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceUD, 1.0f, 0.0001f);
+                        throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceUD, 1.0f, MIN_THRUST_VALUE);
                         throttle += throttleUD;
                         SetThrusterPercent(throttleUD, ref downThrusters);
                     }
                     else
                     {
-                        SetThrusterByVal(0.0001f, ref upThrusters);
-                        SetThrusterByVal(0.0001f, ref downThrusters);
+                        SetThrusterByVal(MIN_THRUST_VALUE, ref upThrusters);
+                        SetThrusterByVal(MIN_THRUST_VALUE, ref downThrusters);
                     }
 
-                    /*WriteStatsToLCD( 
-                        "Forward: " + currentVectorSpeed.Z + 
-                        "\nForward: " + targetVectorSpeed.Z +
-                        "\nDif: " + speedDifferanceFB +
-                        "\nRight: " + currentVectorSpeed.Y + 
-                        "\nRight: " + targetVectorSpeed.Y +
-                        "\nDif: " + speedDifferanceLR +
-                        "\nUp: " + currentVectorSpeed.X + 
-                        "\nUp: " + targetVectorSpeed.X +
-                        "\nDif: " + speedDifferanceUD);*/
+                    /*WriteStatsToLCD(
+                                "Forward: " + currentVectorSpeed.Z +
+                                "\nForward: " + targetVectorSpeed.Z +
+                                "\nDif: " + speedDifferanceFB +
+                                "\nRight: " + currentVectorSpeed.Y +
+                                "\nRight: " + targetVectorSpeed.Y +
+                                "\nDif: " + speedDifferanceRR +
+                                "\nUp: " + currentVectorSpeed.X +
+                                "\nUp: " + targetVectorSpeed.X +
+                                "\nDif: " + speedDifferanceUD);*/
                 }
                 CheckDoubleTapRelease();
             }
+        }
+
+        public void GOVERNORMode(int shipDirX, int shipDirY, int shipDirZ)
+        {
+            //Get current speed
+            currentSpeed = controlSeat.GetShipSpeed();
+            //current speed X
+            currentVectorSpeed.X = GetShipDirectionalSpeed(Base6Directions.Direction.Up);
+            //current Speed Y
+            currentVectorSpeed.Y = GetShipDirectionalSpeed(Base6Directions.Direction.Right);
+            //Current speed Z
+            currentVectorSpeed.Z = GetShipDirectionalSpeed(Base6Directions.Direction.Forward);
+            //get current speed
+            float speedDifferanceF = (float)(maxSpeed - currentVectorSpeed.Z);
+            float speedDifferanceB = (float)(maxSpeed + currentVectorSpeed.Z);
+            float speedDifferanceR = (float)(maxSpeed - currentVectorSpeed.Y);
+            float speedDifferanceL = (float)(maxSpeed + currentVectorSpeed.Y);
+            float speedDifferanceD = (float)(maxSpeed + currentVectorSpeed.X);
+            float speedDifferanceU = (float)(maxSpeed - currentVectorSpeed.X);
+
+
+            if (shipDirZ == -1)      //forward (yes, a negative value means forward)
+            {
+                if (speedDifferanceF < 0)
+                {
+                    throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceF, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleFB;
+                    SetThrusterPercent(throttleFB, ref backwardThrusters);
+                    SetThrusterByVal(MIN_THRUST_VALUE, ref forwardThrusters);
+                }
+                else
+                {
+                    throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceF, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleFB;
+                    SetThrusterPercent(throttleFB, ref forwardThrusters);
+                }
+                lastKeyForward = true;
+            }
+            else if (shipDirZ == 1)  //backwards (because vectors are weird)
+            {
+                if (speedDifferanceB < 0)
+                {
+                    throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceB, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleFB;
+                    SetThrusterPercent(throttleFB, ref forwardThrusters);
+                    SetThrusterByVal(MIN_THRUST_VALUE, ref backwardThrusters);
+                }
+                else
+                {
+                    throttleFB = GetShipThrottle(MULTIPLIER, speedDifferanceB, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleFB;
+                    SetThrusterPercent(throttleFB, ref backwardThrusters);
+                }
+                lastKeyBackward = true;
+            }
+
+            if (shipDirX == -1)
+            {
+                if (speedDifferanceL < 0)
+                {
+                    throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceL, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleLR;
+                    SetThrusterPercent(throttleLR, ref leftThrusters);
+                    SetThrusterByVal(MIN_THRUST_VALUE, ref rightThrusters);
+                }
+                else
+                {
+                    throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceL, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleLR;
+                    SetThrusterPercent(throttleLR, ref rightThrusters);
+                }
+            }
+            else if (shipDirX == 1)
+            {
+                if (speedDifferanceR < 0)
+                {
+                    throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceR, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleLR;
+                    SetThrusterPercent(throttleLR, ref rightThrusters);
+                    SetThrusterByVal(MIN_THRUST_VALUE, ref leftThrusters);
+                }
+                else
+                {
+                    throttleLR = GetShipThrottle(MULTIPLIER, speedDifferanceR, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleLR;
+                    SetThrusterPercent(throttleLR, ref leftThrusters);
+                }
+            }
+
+            if (shipDirY == -1)      //down
+            {
+                if (speedDifferanceD < 0)
+                {
+                    throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceD, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleUD;
+                    SetThrusterPercent(throttleUD, ref upThrusters);
+                    SetThrusterByVal(MIN_THRUST_VALUE, ref downThrusters);
+                }
+                else
+                {
+                    throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceD, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleUD;
+                    SetThrusterPercent(throttleUD, ref downThrusters);
+                }
+            }
+            else if (shipDirY == 1)  //Up
+            {
+                if (speedDifferanceU < 0)
+                {
+                    throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceU, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleUD;
+                    SetThrusterPercent(throttleUD, ref downThrusters);
+                    SetThrusterByVal(MIN_THRUST_VALUE, ref upThrusters);
+                }
+                else
+                {
+                    throttleUD = GetShipThrottle(MULTIPLIER, speedDifferanceU, 1.0f, MIN_THRUST_VALUE);
+                    throttle = throttleUD;
+                    SetThrusterPercent(throttleUD, ref upThrusters);
+                }
+            }
+
+
+
+            if (shipDirZ == 0 && shipDirY == 0 && shipDirX == 0)     //No buttons held
+            {
+                DisableThrusterOveride(upThrusters);
+                DisableThrusterOveride(downThrusters);
+                DisableThrusterOveride(leftThrusters);
+                DisableThrusterOveride(rightThrusters);
+                DisableThrusterOveride(forwardThrusters);
+                DisableThrusterOveride(backwardThrusters);
+                CheckDoubleTapRelease();
+            }
+
         }
 
         public void CheckDoubleTapRelease()
@@ -684,11 +957,11 @@ namespace IngameScript
         }
 
         /*
-         * Check to make sure the cockpit/remote block still works and is controlled
-         */
+                * Check to make sure the cockpit/remote block still works and is controlled
+                */
         public void CheckControlSeat()
         {
-            
+
             if (controlSeat != null && controlRemote == null)
             {
                 if (controlSeat.IsUnderControl == false)
@@ -740,8 +1013,8 @@ namespace IngameScript
             }
         }
         /*
-        * Returns the thrusters facing forward for a given list of thrusters
-        */
+            * Returns the thrusters facing forward for a given list of thrusters
+            */
         public void GetForwardThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
         {
             foundForwardThrusters = new List<IMyThrust>();
@@ -751,8 +1024,8 @@ namespace IngameScript
         }
 
         /*
-        * Updates the thrusters facing Backward for a given list of thrusters
-        */
+            * Updates the thrusters facing Backward for a given list of thrusters
+            */
         public void GetBackwardThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
         {
             foundForwardThrusters = new List<IMyThrust>();
@@ -762,8 +1035,8 @@ namespace IngameScript
         }
 
         /*
-        * Updates the thrusters facing Up for a given list of thrusters
-        */
+            * Updates the thrusters facing Up for a given list of thrusters
+            */
         public void GetUpThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
         {
             foundForwardThrusters = new List<IMyThrust>();
@@ -773,8 +1046,8 @@ namespace IngameScript
         }
 
         /*
-        * Updates the thrusters facing Down for a given list of thrusters
-        */
+            * Updates the thrusters facing Down for a given list of thrusters
+            */
         public void GetDownThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
         {
             foundForwardThrusters = new List<IMyThrust>();
@@ -784,8 +1057,8 @@ namespace IngameScript
         }
 
         /*
-        * Updates the thrusters facing Left for a given list of thrusters
-        */
+            * Updates the thrusters facing Left for a given list of thrusters
+            */
         public void GetLeftThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
         {
             foundForwardThrusters = new List<IMyThrust>();
@@ -795,8 +1068,8 @@ namespace IngameScript
         }
 
         /*
-        * Updates the thrusters facing Right for a given list of thrusters
-        */
+            * Updates the thrusters facing Right for a given list of thrusters
+            */
         public void GetRightThrusters(List<IMyThrust> allThrusters, ref List<IMyThrust> foundForwardThrusters)
         {
             foundForwardThrusters = new List<IMyThrust>();
@@ -806,8 +1079,8 @@ namespace IngameScript
         }
 
         /*
-        * Updates the direction a ship is trying to go
-        */
+            * Updates the direction a ship is trying to go
+            */
         public Vector3I GetShipsDesiredDirection(IMyCockpit oriantationBlock)
         {
             Vector3I direction;
@@ -845,12 +1118,12 @@ namespace IngameScript
         }
 
         /*
-        * Sets all the thrusters in the list to a percent where 0 is off and 1 is full
-        */
+            * Sets all the thrusters in the list to a percent where 0 is off and 1 is full
+            */
         public void SetThrusterPercent(float percent, ref List<IMyThrust> thrusters)
         {
-            
-            
+
+
             if (thrusters != null)
             {
                 for (int i = 0; i < thrusters.Count; i++)
@@ -861,12 +1134,12 @@ namespace IngameScript
         }
 
         /*
-        * Sets all the thrusters in the list to a percent where 0 is off and 1 is full
-        */
+            * Sets all the thrusters in the list to a percent where 0 is off and 1 is full
+            */
         public void SetSeparateThrusterPercent(float electroPercent, float hydrogenPercent, ref List<IMyThrust> thrusters)
         {
-            
-            
+
+
             if (thrusters != null)
             {
                 for (int i = 0; i < thrusters.Count; i++)
@@ -875,7 +1148,7 @@ namespace IngameScript
                     {
                         thrusters[i].ThrustOverridePercentage = hydrogenPercent;
                     }
-                    
+
                     else
                         thrusters[i].ThrustOverridePercentage = electroPercent;
 
@@ -884,12 +1157,12 @@ namespace IngameScript
         }
 
         /*
-        * Sets all the thrusters in the list to an amount where 0 is off and 1 is full
-        */
+            * Sets all the thrusters in the list to an amount where 0 is off and 1 is full
+            */
         public void SetThrusterByVal(float val, ref List<IMyThrust> thrusters)
         {
-            
-            
+
+
             if (thrusters != null)
             {
                 for (int i = 0; i < thrusters.Count; i++)
@@ -901,8 +1174,8 @@ namespace IngameScript
 
         public void DisableThrusterOveride(List<IMyThrust> thrusters)
         {
-            
-            
+
+
             if (thrusters != null)
                 foreach (IMyThrust thruster in thrusters)
                 {
@@ -912,8 +1185,8 @@ namespace IngameScript
 
         public void DisableThrusterOverideAll()
         {
-            
-            
+
+
             if (thrusters != null)
                 foreach (IMyThrust thruster in thrusters)
                 {
@@ -944,17 +1217,24 @@ namespace IngameScript
                     break;
             }
             output = "Status: " + cursor;
-            output += "\nSpeed: " + Math.Round(speed, 2) + "m / s" + '\n' +
-                        "Target:          " + Math.Round(targetSpeed, 2) + "m/s" + '\n' +
-                        "Delay:           " + timeToSpeed + "s" + '\n' +
-                        "Throttle:        " + Math.Round(throttleOutput * 100, 1) + "%" + '\n' +
-                        "Eco Mode:     " + eco + '\n';
+            if (flightMode == 4)
+                output += "\nSpeed: " + Math.Round(speed, 2) + "m / s" + '\n' +
+                            "Max Speed:  " + Math.Round(maxSpeed, 2) + "m/s" + '\n' +
+                            "Delay:           " + timeToSpeed + "s" + '\n' +
+                            "Throttle:        " + Math.Round(throttleOutput * 100, 1) + "%" + '\n' +
+                            "Eco Mode:     " + eco + '\n';
+            else
+                output += "\nSpeed: " + Math.Round(speed, 2) + "m / s" + '\n' +
+                            "Target:          " + Math.Round(targetSpeed, 2) + "m/s" + '\n' +
+                            "Delay:           " + timeToSpeed + "s" + '\n' +
+                            "Throttle:        " + Math.Round(throttleOutput * 100, 1) + "%" + '\n' +
+                            "Eco Mode:     " + eco + '\n';
 
             if (SMALL_LCD_MODE)
             {
-				switch (flightMode)
+                switch (flightMode)
 
-				{
+                {
                     case 0:
                         state = "NORMAL";
                         break;
@@ -967,6 +1247,9 @@ namespace IngameScript
                     case 3:
                         state = "DECOUPLED";
                         break;
+                    case 4:
+                        state = "GOVERNOR";
+                        break;
                     default:
                         state = "UNKNOWN: " + flightMode;
                         break;
@@ -974,42 +1257,30 @@ namespace IngameScript
             }
             else
             {
-                output += "\\/  Flight Mode  \\/\n";
+                state = "";
+                output += "\\/  Flight Mode  \\/";
 
-                switch (flightMode)
-                {
-                    case 0:
-                        state = (
-                                    "DECOUPLED" + '\n' +
-                                    "CRUISE" + '\n' +
-                                    "NORMAL           <==" + '\n'
-                                );
-                        break;
-                    case 1:
-                        state = (
-                                    "DECOUPLED" + '\n' +
-                                    "CRUISE             <==" + '\n' +
-                                    "NORMAL" + '\n'
-                                );
-                        break;
-                    case 2:
-                        state = (
-                                    "DECOUPLED" + '\n' +
-                                    "CRUISE+           <==" + '\n' +
-                                    "NORMAL" + '\n'
-                                );
-                        break;
-                    case 3:
-                        state = (
-                                    "DECOUPLED  <==" + '\n' +
-                                    "CRUISE" + '\n' +
-                                    "NORMAL" + '\n'
-                                );
-                        break;
-                    default:
-                        state = "Unknown Mode: " + flightMode;
-                        break;
-                }
+                if (ALLOW_GOVERNOR_MODE)
+                    if (flightMode == 4)
+                        state += "\nGOVERNOR  <==";
+                    else
+                        state += "\nGOVERNOR";
+                if (ALLOW_DECOUPLED_MODE)
+                    if (flightMode == 3)
+                        state += "\nDECOUPLED  <==";
+                    else
+                        state += "\nDECOUPLED";
+                if (ALLOW_CRUISE_MODE || ALLOW_CRUISE_PLUS_MODE)
+                    if (flightMode == 2)
+                        state += "\nCRUISE+  <==";
+                    else if (flightMode == 1)
+                        state += "\nCRUISE   <==";
+                    else
+                        state += "\nCRUISE";
+                if (flightMode == 0)
+                    state += "\nNORMAL  <==";
+                else
+                    state += "\nNORMAL";
             }
             output += state;
             return output;
@@ -1054,54 +1325,33 @@ namespace IngameScript
         }
 
         /*
-		* Returns a flight mode based on the current flight mode and the direction, true means move up, false down
-		*/
-        public byte getFlightMode(byte currentMode, bool goUp)
+            * Returns a flight mode based on the current flight mode and the direction, true means move up, false down
+            */
+        public int getFlightMode(int currentMode, bool goUp)
         {
+            int checkMode;
+            if (goUp)
+                checkMode = currentMode + 1;
+            else
+                checkMode = currentMode - 1;
 
-            switch (currentMode)
+            if (checkMode <= maxFlightMode && checkMode >= minFlightMode)
             {
-                case 0:
-                    if (goUp)
-                        currentMode++;
-                    break;
-                case 1:
-                    if (goUp)
-                        currentMode++;
-                    else
-                    {
-                        currentMode--;
-                        EmergencyStop(false);
-                    }
-                    break;
-                case 2:
-                    if (goUp)
-                        currentMode++;
-                    else
-                    {
-                        currentMode--;
-                        EmergencyStop(false);
-                    }
-                    break;
-                case 3:
-                    if (!goUp)
-                    {
-                        EmergencyStop(false);
-                        currentMode--;
-                        targetVectorSpeed.Z = currentVectorSpeed.Z;
-                        targetVectorSpeed.Y = currentVectorSpeed.Y;
-                        targetVectorSpeed.X = currentVectorSpeed.X;
-                    }
-                    break;
+                if (allowedModes.Contains(checkMode.ToString()))
+                {
+                    EmergencyStop(false);
+                    return checkMode;
+                }
+                else
+                    return getFlightMode(checkMode, goUp);
             }
-
             return currentMode;
         }
 
         /*
-        * Returns the time it will take for a ship to reach a set speed
-        * Uses a list of thrusters, cockpit, a current speed and a wanted speed
-        */
+            * Returns the time it will take for a ship to reach a set speed
+            * Uses a list of thrusters, cockpit, a current speed and a wanted speed
+            */
         public double GetTimeToSpeed(double wantedSpeed, double currentSpeed, List<IMyThrust> thrustersInDirection)
         {
             float maxthrust = 0;
@@ -1124,9 +1374,9 @@ namespace IngameScript
         }
 
         /*
-        * Returns the speed given a direction
-        * Example direction: Base6Directions.Direction.Forward
-        */
+            * Returns the speed given a direction
+            * Example direction: Base6Directions.Direction.Forward
+            */
         public double GetShipDirectionalSpeed(IMyCockpit cockpit, Base6Directions.Direction direction)
         {
             //get the velocity of the ship as a vector
@@ -1161,9 +1411,9 @@ namespace IngameScript
         }
 
         /*
-         * Returns the throttle between two values
-         * Throttle is calculated using a parabola
-         */
+                * Returns the throttle between two values
+                * Throttle is calculated using a parabola
+                */
         public float GetShipThrottle(float m, float differance, float max, float min)
         {
             float value = (float)(m * Math.Pow(differance, 2));
@@ -1232,10 +1482,14 @@ namespace IngameScript
         //Go through and remove all blocks not on the same grid
         public List<IMyCockpit> RemoveSupergridBlocks(List<IMyCockpit> myCockpits)
         {
-            List<IMyCockpit> newList =  new List<IMyCockpit>();
-            foreach(IMyCockpit cur in myCockpits)
+            List<IMyCockpit> newList = new List<IMyCockpit>();
+            foreach (IMyCockpit cur in myCockpits)
             {
-                if (cur.CubeGrid == Me.CubeGrid)
+                if (ENABLE_SUB_GRID_THRUSTERS)
+                {
+                    newList.Add(cur);
+                }
+                else if (cur.CubeGrid == Me.CubeGrid)
                 {
                     newList.Add(cur);
                 }
@@ -1249,7 +1503,11 @@ namespace IngameScript
             List<IMyRemoteControl> newList = new List<IMyRemoteControl>();
             foreach (IMyRemoteControl cur in myCockpits)
             {
-                if (cur.CubeGrid == Me.CubeGrid)
+                if (ENABLE_SUB_GRID_THRUSTERS)
+                {
+                    newList.Add(cur);
+                }
+                else if (cur.CubeGrid == Me.CubeGrid)
                 {
                     newList.Add(cur);
                 }
@@ -1258,14 +1516,18 @@ namespace IngameScript
             return newList;
         }
 
-        public List<IMyThrust> RemoveSupergridBlocks(List<IMyThrust> myCockpits)
+        public List<IMyThrust> RemoveSupergridBlocks(List<IMyThrust> myThrusts)
         {
             List<IMyThrust> newList = new List<IMyThrust>();
-            foreach (IMyThrust cur in myCockpits)
+            foreach (IMyThrust cur in myThrusts)
             {
-                if (cur.CubeGrid == Me.CubeGrid)
+                if (ENABLE_SUB_GRID_THRUSTERS)
                 {
                     newList.Add(cur);
+                }
+                else if (cur.CubeGrid == Me.CubeGrid)
+                {
+                        newList.Add(cur);
                 }
             }
 
@@ -1273,5 +1535,3 @@ namespace IngameScript
         }
     }
 }
-
-//that’s all folks

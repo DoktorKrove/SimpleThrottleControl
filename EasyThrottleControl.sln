@@ -1,0 +1,22 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.32106.194
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EasyThrottleControl", "EasyThrottleControl\EasyThrottleControl.csproj", "{22A0CCA7-5FFF-45CC-A72A-93178540BEC1}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{22A0CCA7-5FFF-45CC-A72A-93178540BEC1}.Debug|x64.ActiveCfg = Debug|x64
+		{22A0CCA7-5FFF-45CC-A72A-93178540BEC1}.Debug|x64.Build.0 = Debug|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {AFEECFDC-0412-4DC6-A65D-11818ED65731}
+	EndGlobalSection
+EndGlobal
