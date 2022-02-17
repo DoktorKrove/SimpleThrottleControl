@@ -428,6 +428,8 @@ namespace IngameScript
                 flightMode = 0;
                 DisableThrusterOverideAll();
             }
+            else if (arg.Contains("decoupled"))
+                flightMode = 3;
             else if (arg.Contains("eco"))
             {
                 if (arg.Contains("on"))
@@ -438,11 +440,9 @@ namespace IngameScript
                     eco_mode = !eco_mode;
             }
             else if (arg.Contains("cruise+"))
-                flightMode = 1;
-            else if (arg.Contains("cruise"))
                 flightMode = 2;
-            else if (arg.Contains("decoupled"))
-                flightMode = 3;
+            else if (arg.Contains("cruise"))
+                flightMode = 1;
             else if (arg.Contains("governor"))
                 flightMode = 4;
             else if (arg.Contains("max "))
@@ -503,7 +503,7 @@ namespace IngameScript
                 case 1:
                     ModeCruise(shipDirZ);
                     break;
-                //Flight mode 2: Decoupled mode, the script will maintain a set speed both forward and backwards, pressing backwards only slows down but doesn't stop
+                //Flight mode 2: Cruise+ mode, the script will maintain a set speed both forward and backwards, pressing backwards only slows down but doesn't stop
                 case 2:
                     ModeCruisePlus(shipDirZ);
                     break;
