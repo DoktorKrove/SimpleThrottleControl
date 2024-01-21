@@ -92,6 +92,7 @@ namespace IngameScript
 
         //The delay between key presses to activate different modes
         //this is in ticks, there are 60 ticks in a second.
+        //To disable double tap set to 0
         const int DOUBLE_TAP_DELAY = 15;
 
         //The word that a cockpit or remote control block
@@ -128,7 +129,6 @@ namespace IngameScript
         List<IMyTextPanel> textPanels = new List<IMyTextPanel>();
         IMyBlockGroup thrusterBlockGroups;
         List<IMyThrust> thrusterGroup = new List<IMyThrust>();
-        List<IMyShipConnector> connectors = new List<IMyShipConnector>();
         List<IMyThrust> forwardThrusters;
         List<IMyThrust> backwardThrusters;
         List<IMyThrust> upThrusters;
@@ -241,7 +241,6 @@ namespace IngameScript
             GridTerminalSystem.GetBlocksOfType(remotes, remoteCon => remoteCon.IsWorking);
             GridTerminalSystem.GetBlocksOfType(thrusters);
             GridTerminalSystem.GetBlocksOfType(textPanels, blockName => blockName.DisplayNameText.Contains(LCD_TAG));
-            GridTerminalSystem.GetBlocksOfType(connectors);
             if (GROUP_NAME != "")
             {
                 thrusterBlockGroups = GridTerminalSystem.GetBlockGroupWithName(GROUP_NAME);
@@ -257,7 +256,6 @@ namespace IngameScript
             //Get remote blocks
             int mainRemoteCount = 0;
             int mainCockpitCount = 0;
-            bool allConnectorsUnconnected;
             for (int i = 0; i < remotes.Count; i++)
             {
                 if (remotes[i].DisplayNameText.ToLower().Contains(MAIN_CONTROL_BLOCK_WORD.ToLower()))
@@ -276,16 +274,6 @@ namespace IngameScript
                 if (cockpits[i].IsMainCockpit)
                     checkedCockpit = i;
             }
-            bool connectedConnector = false;
-            foreach (IMyShipConnector cur in connectors)
-            {
-                if (cur.Status == MyShipConnectorStatus.Connected)
-                    connectedConnector = true;
-            }
-            if (connectedConnector)
-                allConnectorsUnconnected = false;
-            else
-                allConnectorsUnconnected = true;
 
 
             //Make sure there is a Main Cockpit
@@ -300,12 +288,6 @@ namespace IngameScript
                 Echo("There are no Main Cockpits or Main Remote Control blocks on your ship\n");
                 Echo("Help:");
                 Echo("Please Add the word  \"" + MAIN_CONTROL_BLOCK_WORD + "\" (without quotes) to the name of a cockpit or remote control block. Then click Recompile Script");
-                flightMode = 0;
-            }
-            else if (ENABLE_SUB_GRID_THRUSTERS && !allConnectorsUnconnected)
-            {
-                Echo("Your ship is connected to another grid!");
-                Echo("Disconnect all connectors to continue.");
                 flightMode = 0;
             }
             else
@@ -395,11 +377,12 @@ namespace IngameScript
             {
                 if (is_active)
                 {
-                    Echo("Script running...");
+                    Echo("Mode: ");
+                    Echo(GetModeFullName(flightMode));
                 }
                 else
                 {
-                    Echo("Script running...");
+                    Echo("Standbye");
                     Echo("Cockpit/remote not occupied");
                 }
                 runningNum++;
@@ -428,6 +411,15 @@ namespace IngameScript
                 flightMode = 0;
                 DisableThrusterOverideAll();
             }
+            else if (arg.Contains("next"))
+            {
+                flightMode = getFlightMode(flightMode, true);
+            }
+            else if (arg.Contains("last") || arg.Contains("previous"))
+            {
+                flightMode = getFlightMode(flightMode, false);
+            }
+
             else if (arg.Contains("decoupled"))
                 flightMode = 3;
             else if (arg.Contains("eco"))
@@ -817,7 +809,6 @@ namespace IngameScript
             float speedDifferanceD = (float)(maxSpeed + currentVectorSpeed.X);
             float speedDifferanceU = (float)(maxSpeed - currentVectorSpeed.X);
 
-
             if (shipDirZ == -1)      //forward (yes, a negative value means forward)
             {
                 if (speedDifferanceF < 0)
@@ -852,6 +843,11 @@ namespace IngameScript
                 }
                 lastKeyBackward = true;
             }
+            else
+            {
+                DisableThrusterOveride(forwardThrusters);
+                DisableThrusterOveride(backwardThrusters);
+            }
 
             if (shipDirX == -1)
             {
@@ -885,6 +881,11 @@ namespace IngameScript
                     SetThrusterPercent(throttleLR, ref leftThrusters);
                 }
             }
+            else
+            {
+                DisableThrusterOveride(leftThrusters);
+                DisableThrusterOveride(rightThrusters);
+            }
 
             if (shipDirY == -1)      //down
             {
@@ -917,6 +918,11 @@ namespace IngameScript
                     throttle = throttleUD;
                     SetThrusterPercent(throttleUD, ref upThrusters);
                 }
+            }
+            else
+            {
+                DisableThrusterOveride(upThrusters);
+                DisableThrusterOveride(downThrusters);
             }
 
 
@@ -966,9 +972,7 @@ namespace IngameScript
             {
                 if (controlSeat.IsUnderControl == false)
                 {
-                    Runtime.UpdateFrequency = UpdateFrequency.Update100;
-                    EmergencyStop(SET_MODE_0_ON_EXIT);
-                    is_active = false;
+                    CheckSeatCondition();
                 }
                 else if (!is_active)
                 {
@@ -980,9 +984,7 @@ namespace IngameScript
             {
                 if (controlSeat.IsUnderControl == false && controlRemote.IsUnderControl == false)
                 {
-                    Runtime.UpdateFrequency = UpdateFrequency.Update100;
-                    EmergencyStop(SET_MODE_0_ON_EXIT);
-                    is_active = false;
+                    CheckSeatCondition();
                 }
                 else if (!is_active)
                 {
@@ -994,9 +996,7 @@ namespace IngameScript
             {
                 if (controlRemote.IsUnderControl == false)
                 {
-                    Runtime.UpdateFrequency = UpdateFrequency.Update100;
-                    EmergencyStop(SET_MODE_0_ON_EXIT);
-                    is_active = false;
+                    CheckSeatCondition();
                 }
                 else if (!is_active)
                 {
@@ -1010,6 +1010,23 @@ namespace IngameScript
                 EmergencyStop(true);
                 setup = true;
                 is_active = false;
+            }
+        }
+
+        /* Used by CheckControlSeat() to check if someone is in the seat
+         * and determin what should happen next. */
+        public void CheckSeatCondition()
+        {
+            if (SET_MODE_0_ON_EXIT)
+            {
+                Runtime.UpdateFrequency = UpdateFrequency.Update100;
+                EmergencyStop(SET_MODE_0_ON_EXIT);
+                is_active = false;
+            }
+            else if (!is_active)
+            {
+                is_active = true;
+                Runtime.UpdateFrequency = UpdateFrequency.Update1;
             }
         }
         /*
@@ -1232,28 +1249,7 @@ namespace IngameScript
 
             if (SMALL_LCD_MODE)
             {
-                switch (flightMode)
-
-                {
-                    case 0:
-                        state = "NORMAL";
-                        break;
-                    case 1:
-                        state = "CRUISE";
-                        break;
-                    case 2:
-                        state = "CRUISE+";
-                        break;
-                    case 3:
-                        state = "DECOUPLED";
-                        break;
-                    case 4:
-                        state = "GOVERNOR";
-                        break;
-                    default:
-                        state = "UNKNOWN: " + flightMode;
-                        break;
-                }
+                state = GetModeFullName(flightMode);
             }
             else
             {
@@ -1262,28 +1258,48 @@ namespace IngameScript
 
                 if (ALLOW_GOVERNOR_MODE)
                     if (flightMode == 4)
-                        state += "\nGOVERNOR  <==";
+                        state += "\n" + GetModeFullName(4) + "  <==";
                     else
-                        state += "\nGOVERNOR";
+                        state += "\n" + GetModeFullName(4) + "";
                 if (ALLOW_DECOUPLED_MODE)
                     if (flightMode == 3)
-                        state += "\nDECOUPLED  <==";
+                        state += "\n" + GetModeFullName(3) + "  <==";
                     else
-                        state += "\nDECOUPLED";
+                        state += "\n" + GetModeFullName(3) + "";
                 if (ALLOW_CRUISE_MODE || ALLOW_CRUISE_PLUS_MODE)
                     if (flightMode == 2)
-                        state += "\nCRUISE+  <==";
+                        state += "\n" + GetModeFullName(2) + "  <==";
                     else if (flightMode == 1)
-                        state += "\nCRUISE   <==";
+                        state += "\n" + GetModeFullName(1) + "   <==";
                     else
-                        state += "\nCRUISE";
+                        state += "\n" + GetModeFullName(1) + "";
                 if (flightMode == 0)
-                    state += "\nNORMAL  <==";
+                    state += "\n" + GetModeFullName(0) + "  <==";
                 else
-                    state += "\nNORMAL";
+                    state += "\n" + GetModeFullName(0) + "";
             }
             output += state;
             return output;
+        }
+
+        private string GetModeFullName(int mode)
+        {
+            switch (mode) {
+                case 0:
+                    return "NORMAL";
+                case 1:
+                    return "CRUISE";
+                case 2:
+                    return "CRUISE+";
+                case 3:
+                    return "DECOUPLED";
+                case 4:
+                    return "GOVERNOR";
+                default:
+                    return "UNKNOWN MODE: " + mode.ToString();
+
+            }
+
         }
 
 
@@ -1473,9 +1489,11 @@ namespace IngameScript
         public void EmergencyStop(bool changeMode)
         {
             if (changeMode)
+            {
                 flightMode = 0;
-            enableCruisControl = false;
-            DisableThrusterOverideAll();
+                enableCruisControl = false;
+                DisableThrusterOverideAll();
+            }
 
         }
 
