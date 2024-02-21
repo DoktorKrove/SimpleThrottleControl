@@ -566,6 +566,7 @@ namespace IngameScript
                         //If vessel is going faster then the wanted speed
                         if (speedDifferance > deadZone)
                         {
+                            DisableThrusterOverideAll();
                             if (eco_mode)
                                 SetSeparateThrusterPercent(throttle, throttleHY, ref forwardThrusters);
                             else
@@ -573,6 +574,7 @@ namespace IngameScript
                         }
                         else if (speedDifferance < -deadZone)
                         {
+                            DisableThrusterOverideAll();
                             if (eco_mode)
                                 SetSeparateThrusterPercent(throttle, throttleHY, ref backwardThrusters);
                             else
@@ -623,6 +625,7 @@ namespace IngameScript
                         //If vessel is going faster then the wanted speed
                         if (speedDifferance > deadZone)
                         {
+                            DisableThrusterOverideAll();
                             if (eco_mode)
                                 SetSeparateThrusterPercent(throttle, throttleHY, ref forwardThrusters);
                             else
@@ -630,6 +633,7 @@ namespace IngameScript
                         }
                         else if (speedDifferance < -deadZone)
                         {
+                            DisableThrusterOverideAll();
                             if (eco_mode)
                                 SetSeparateThrusterPercent(throttle, throttleHY, ref backwardThrusters);
                             else
